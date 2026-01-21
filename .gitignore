@@ -217,3 +217,7 @@ __marimo__/
 
 # Conda
 .conda/
+
+# Data
+
+.data/
