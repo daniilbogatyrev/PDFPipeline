@@ -1,52 +1,85 @@
-from core.identifier import FileIdentifier
-from core.inspector import PDFInspector
-from core.layout_analyzer import LayoutAnalyzer
+"""
+Document Orchestrator.
+Zentrale Pipeline-Steuerung für Dokumentanalyse.
+"""
+
+from .identifier import FileIdentifier
+from .inspector import PDFInspector
+from .extractors import get_default_extractor
+
 
 class DocumentOrchestrator:
     """
-    Die zentrale Logik-Einheit. Sie steuert, welche Module 
-    in welcher Reihenfolge auf ein Dokument angewendet werden.
+    Zentrale Pipeline-Steuerung.
+    
+    Pipeline:
+        1. Identifier (Magika): Dateityp erkennen
+        2. Inspector: Native vs Scanned unterscheiden
+        3. Extractor: Tabellen, Bilder, etc. zählen
     """
+    
     def __init__(self):
         self.identifier = FileIdentifier()
         self.inspector = PDFInspector()
-        # NEU: Analyzer initialisieren
-        self.layout_analyzer = LayoutAnalyzer()
+        self.extractor = get_default_extractor()
 
     def run_pipeline(self, file_bytes: bytes, filename: str) -> dict:
         """
         Führt die mehrstufige Analyse durch.
+        
+        Returns:
+            dict mit allen Analyse-Ergebnissen
         """
-        # --- Stufe 1: Identifikation ---
+        # Stufe 1: Identifikation (Magika)
         id_results = self.identifier.identify(file_bytes)
         
-        # Initialer Ergebnis-Container (State)
         pipeline_output = {
             "filename": filename,
             "format": id_results["label"],
             "mime": id_results["mime"],
             "confidence": id_results["score"],
-            "pdf_details": None,       # Bleibt für Inspector-Ergebnisse (Native/Scan)
-            "layout_stats": None,      # NEU: Für Tabellen/Bilder-Zählung
-            "reasoning": None,         # NEU: Die Erklärung für den User
+            "pdf_details": None,
+            "layout_stats": None,
+            "reasoning": None,
             "pipeline_status": "COMPLETED"
         }
 
-        # --- Stufe 2: Bedingte Inspektion ---
+        # Stufe 2 & 3: Nur für PDFs
         if id_results["label"] == "pdf":
-            # 2a. Inspection (Native vs Scan)
+            # 2a. Inspection (Native vs Scanned)
             inspection_results = self.inspector.inspect(file_bytes)
             pipeline_output["pdf_details"] = inspection_results
             
-            # 2b. Layout Analysis (Profile Report) - NEU
-            # Wir nutzen das Ergebnis aus der Inspection ('sub_type'), um den Analyzer zu steuern
             sub_type = inspection_results["sub_type"]
-            layout_results = self.layout_analyzer.analyze(file_bytes, sub_type)
-            pipeline_output["layout_stats"] = layout_results
-
-            # 2c. Reasoning generieren (Begründung für den User)
-            pipeline_output["reasoning"] = self._generate_reasoning(sub_type, layout_results)
-
+            
+            # 2b. Extraktion (nur für Native PDFs sinnvoll)
+            if sub_type == "NATIVE":
+                extraction = self.extractor.extract(file_bytes, filename)
+                
+                pipeline_output["layout_stats"] = {
+                    "tables": extraction.table_count,
+                    "images": extraction.image_count,
+                    "images_total": extraction.image_count_total,
+                    "paragraphs": extraction.paragraphs,
+                    "math_formulas": extraction.math_formulas,
+                    "pages": extraction.pages
+                }
+            else:
+                # Für Scanned/Vector: Keine Extraktion möglich
+                pipeline_output["layout_stats"] = {
+                    "tables": 0,
+                    "images": inspection_results.get("image_count", 0),
+                    "images_total": inspection_results.get("image_count", 0),
+                    "paragraphs": 0,
+                    "math_formulas": 0,
+                    "pages": inspection_results.get("pages", 0),
+                    "requires_ocr": sub_type == "SCANNED"
+                }
+            
+            # Reasoning
+            pipeline_output["reasoning"] = self._generate_reasoning(
+                sub_type, pipeline_output["layout_stats"]
+            )
         else:
             pipeline_output["pipeline_status"] = "PARTIAL_NON_PDF"
             pipeline_output["reasoning"] = f"Format '{id_results['label']}' wird aktuell nur identifiziert."
@@ -54,12 +87,18 @@ class DocumentOrchestrator:
         return pipeline_output
 
     def _generate_reasoning(self, sub_type: str, stats: dict) -> str:
-        """Erzeugt die wissenschaftliche Begründung für die Pipeline-Wahl."""
+        """Erzeugt die Begründung für den User."""
         if sub_type == "NATIVE":
-            return (f"Digitales PDF erkannt ({stats['paragraphs']} Textblöcke). "
-                    f"Nutze deterministische Extraktion für {stats['tables']} Tabellen.")
+            return (
+                f"Digitales PDF erkannt ({stats.get('paragraphs', 0)} Textblöcke). "
+                f"Nutze deterministische Extraktion für {stats.get('tables', 0)} Tabellen."
+            )
         elif sub_type == "SCANNED":
-            return ("Gescanntes Dokument (Pixel-basiert). "
-                    "Aktiviere Vision-Pipeline & OCR für Informationsextraktion.")
+            return (
+                "Gescanntes Dokument (Pixel-basiert). "
+                "Für Tabellen-/Texterkennung ist OCR erforderlich."
+            )
+        elif sub_type == "VECTOR_GRAPHIC":
+            return "Vektor-Grafik erkannt. Nutze spezialisierte Vektor-Extraktion."
         else:
-            return "Unbekannter PDF-Typ oder Vektor-Grafik. Nutze Standard-Parsing."
+            return "Unbekannter PDF-Typ. Standard-Parsing aktiv."
