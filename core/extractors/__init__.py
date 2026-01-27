@@ -5,6 +5,9 @@ PDF Extractors Package.
 from .base import BaseExtractor, ExtractionResult
 from .pymupdf_extractors import PyMuPDFExtractor
 from .pdf_plumber_extractor import PDFPlumberExtractor
+from .camelot_extractor import CamelotExtractor
+from .tabula_extractor import TabulaExtractor
+
 
 
 def get_default_extractor() -> PyMuPDFExtractor:
@@ -23,6 +26,11 @@ def get_benchmark_extractors() -> list[BaseExtractor]:
         PyMuPDFExtractor(table_strategy="lines_strict", detect_continuations=False),
         PyMuPDFExtractor(table_strategy="lines", detect_continuations=False),
         PDFPlumberExtractor(),
+        CamelotExtractor(flavor="lattice"),
+        CamelotExtractor(flavor="stream"),
+        TabulaExtractor(mode="lattice"),
+        TabulaExtractor(mode="stream"),
+
     ]
 
 
@@ -39,4 +47,6 @@ __all__ = [
     "get_default_extractor",
     "get_benchmark_extractors",
     "get_available_extractors",
+    "CamelotExtractor",
+    "TabulaExtractor",  
 ]

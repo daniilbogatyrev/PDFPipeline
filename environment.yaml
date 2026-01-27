@@ -7,5 +7,6 @@ pip:
   - streamlit
   - magika
   - pandas
-  - 
-  -
+  - camelot
+  - pymupdf
+  - tabula-py

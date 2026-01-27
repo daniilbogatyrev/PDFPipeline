@@ -12,3 +12,6 @@ __all__ = [
     "BenchmarkResult",
     "ToolMetrics",
 ]
+
+
+# Was macht __all__?
