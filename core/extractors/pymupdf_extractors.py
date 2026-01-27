@@ -1,14 +1,14 @@
 """
 PyMuPDF Extractor.
-Ersetzt den alten layout_analyzer.py mit verbesserter Logik.
+Erweitert mit präziser Tabellen-Tracking über Seiten hinweg.
 """
 
 from pathlib import Path
-from typing import Union, Optional
+from typing import Union, Optional, List
 import time
 import re
 
-from .base import BaseExtractor, ExtractionResult
+from .base import BaseExtractor, ExtractionResult, ExtractedTable
 
 
 class PyMuPDFExtractor(BaseExtractor):
@@ -16,7 +16,8 @@ class PyMuPDFExtractor(BaseExtractor):
     Extractor basierend auf PyMuPDF (fitz).
     
     Features:
-        - Tabellenzählung mit Fortsetzungs-Erkennung
+        - Tabellenzählung mit Fortsetzungs-Erkennung (spanning tables)
+        - Präzise Seiten-Zuordnung pro Tabelle
         - Bild-Deduplizierung
         - Paragraph-Zählung (ohne Header/Footer)
         - Mathe-Erkennung
@@ -51,6 +52,9 @@ class PyMuPDFExtractor(BaseExtractor):
         except ImportError:
             return False
     
+    def supports_continuation_detection(self) -> bool:
+        return self.detect_continuations
+    
     def extract(self, source: Union[Path, bytes], filename: str = "") -> ExtractionResult:
         """Extrahiert alle Metriken aus einem PDF."""
         result = ExtractionResult(
@@ -71,14 +75,15 @@ class PyMuPDFExtractor(BaseExtractor):
             result.pages = len(doc)
             
             # Extrahiere alles
-            tables = self._extract_tables(doc)
+            tables_result = self._extract_tables_detailed(doc)
             images = self._extract_images(doc)
             content = self._extract_content(doc)
             
             doc.close()
             
-            result.table_count = tables["count"]
-            result.tables_data = tables["data"]
+            result.table_count = tables_result["count"]
+            result.tables = tables_result["tables"]
+            result.tables_data = tables_result["legacy_data"]  # Abwärtskompatibilität
             result.image_count = images["unique"]
             result.image_count_total = images["total"]
             result.paragraphs = content["paragraphs"]
@@ -87,7 +92,8 @@ class PyMuPDFExtractor(BaseExtractor):
             
             result.metadata = {
                 "strategy": self.table_strategy,
-                "continuations_detected": tables.get("continuations", 0)
+                "continuations_detected": tables_result.get("continuations", 0),
+                "spanning_tables": tables_result.get("spanning_count", 0)
             }
             
         except Exception as e:
@@ -95,14 +101,31 @@ class PyMuPDFExtractor(BaseExtractor):
         
         return result
     
-    def _extract_tables(self, doc) -> dict:
-        """Extrahiert Tabellen mit Fortsetzungs-Erkennung."""
-        tables_list = []
-        table_count = 0
-        continuations = 0
+    def _extract_tables_detailed(self, doc) -> dict:
+        """
+        Extrahiert Tabellen mit detaillierter Seiten-Zuordnung.
+        
+        Tracking-Logik:
+        1. Für jede Seite: Finde alle Tabellen
+        2. Prüfe ob erste Tabelle Fortsetzung der letzten ist
+        3. Wenn ja: Aktualisiere continues_to_page der vorherigen
+        4. Wenn nein: Neue logische Tabelle
+        
+        Returns:
+            dict mit count, tables (List[ExtractedTable]), legacy_data, continuations
+        """
+        extracted_tables: List[ExtractedTable] = []
+        legacy_data: List[dict] = []
+        
+        logical_table_id = 0
+        total_continuations = 0
+        
+        # Tracking für Spanning-Tabellen
         last_table_info: Optional[dict] = None
+        current_spanning_table: Optional[ExtractedTable] = None
         
         for page_num, page in enumerate(doc):
+            page_number = page_num + 1  # 1-basiert
             page_height = page.rect.height
             
             try:
@@ -111,47 +134,92 @@ class PyMuPDFExtractor(BaseExtractor):
             except Exception:
                 page_tables = []
             
-            new_tables = len(page_tables)
-            
-            if page_tables:
-                first_table = page_tables[0]
-                
-                # Prüfe Fortsetzung
+            for idx, table in enumerate(page_tables):
+                is_first_on_page = (idx == 0)
                 is_continuation = False
-                if self.detect_continuations and last_table_info:
+                
+                # Prüfe ob erste Tabelle der Seite eine Fortsetzung ist
+                if is_first_on_page and self.detect_continuations and last_table_info:
                     is_continuation = self._is_continuation(
-                        first_table, last_table_info, page_height
+                        table, last_table_info, page_height
                     )
                 
                 if is_continuation:
-                    new_tables -= 1
-                    continuations += 1
-                
-                # Speichere Details
-                for idx, table in enumerate(page_tables):
-                    tables_list.append({
-                        "page": page_num + 1,
+                    total_continuations += 1
+                    
+                    # Aktualisiere die spanning Tabelle
+                    if current_spanning_table:
+                        current_spanning_table.continues_to_page = page_number
+                    
+                    # Füge Continuation-Marker hinzu
+                    cont_table = ExtractedTable(
+                        table_id=current_spanning_table.table_id if current_spanning_table else logical_table_id,
+                        page=page_number,
+                        rows=table.row_count,
+                        cols=table.col_count,
+                        bbox=table.bbox,
+                        is_continuation=True
+                    )
+                    extracted_tables.append(cont_table)
+                    
+                    # Legacy data
+                    legacy_data.append({
+                        "page": page_number,
                         "rows": table.row_count,
                         "cols": table.col_count,
-                        "is_continuation": (idx == 0 and is_continuation)
+                        "is_continuation": True
+                    })
+                else:
+                    # Neue logische Tabelle
+                    logical_table_id += 1
+                    
+                    new_table = ExtractedTable(
+                        table_id=logical_table_id,
+                        page=page_number,
+                        rows=table.row_count,
+                        cols=table.col_count,
+                        bbox=table.bbox,
+                        is_continuation=False,
+                        continues_to_page=None  # Wird ggf. später aktualisiert
+                    )
+                    extracted_tables.append(new_table)
+                    current_spanning_table = new_table
+                    
+                    # Legacy data
+                    legacy_data.append({
+                        "page": page_number,
+                        "rows": table.row_count,
+                        "cols": table.col_count,
+                        "is_continuation": False
                     })
                 
-                # Update Tracking
-                last_table = page_tables[-1]
+                # Update Tracking für nächste Iteration
                 last_table_info = {
-                    "cols": last_table.col_count,
-                    "y1": last_table.bbox[3],
-                    "page_height": page_height
+                    "cols": table.col_count,
+                    "y1": table.bbox[3],
+                    "page_height": page_height,
+                    "page": page_number
                 }
-            else:
-                last_table_info = None
             
-            table_count += max(0, new_tables)
+            # Wenn keine Tabellen auf der Seite: Reset Tracking
+            if not page_tables:
+                last_table_info = None
+                current_spanning_table = None
         
-        return {"count": table_count, "data": tables_list, "continuations": continuations}
+        # Zähle nur Haupt-Tabellen (nicht Fortsetzungen)
+        main_tables = [t for t in extracted_tables if not t.is_continuation]
+        spanning_count = sum(1 for t in main_tables if t.is_spanning)
+        
+        return {
+            "count": len(main_tables),
+            "tables": extracted_tables,
+            "legacy_data": legacy_data,
+            "continuations": total_continuations,
+            "spanning_count": spanning_count
+        }
     
     def _is_continuation(self, table, last_info: dict, page_height: float) -> bool:
-        """Prüft ob Tabelle eine Fortsetzung ist."""
+        """Prüft ob Tabelle eine Fortsetzung der vorherigen ist."""
         same_cols = table.col_count == last_info["cols"]
         was_at_bottom = last_info["y1"] > last_info["page_height"] * self.CONTINUATION_BOTTOM
         starts_at_top = table.bbox[1] < page_height * self.CONTINUATION_TOP

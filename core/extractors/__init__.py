@@ -2,12 +2,11 @@
 PDF Extractors Package.
 """
 
-from .base import BaseExtractor, ExtractionResult
+from .base import BaseExtractor, ExtractionResult, ExtractedTable
 from .pymupdf_extractors import PyMuPDFExtractor
 from .pdf_plumber_extractor import PDFPlumberExtractor
 from .camelot_extractor import CamelotExtractor
 from .tabula_extractor import TabulaExtractor
-
 
 
 def get_default_extractor() -> PyMuPDFExtractor:
@@ -30,7 +29,6 @@ def get_benchmark_extractors() -> list[BaseExtractor]:
         CamelotExtractor(flavor="stream"),
         TabulaExtractor(mode="lattice"),
         TabulaExtractor(mode="stream"),
-
     ]
 
 
@@ -42,11 +40,12 @@ def get_available_extractors() -> list[BaseExtractor]:
 __all__ = [
     "BaseExtractor",
     "ExtractionResult",
+    "ExtractedTable",
     "PyMuPDFExtractor",
     "PDFPlumberExtractor",
+    "CamelotExtractor",
+    "TabulaExtractor",
     "get_default_extractor",
     "get_benchmark_extractors",
     "get_available_extractors",
-    "CamelotExtractor",
-    "TabulaExtractor",  
 ]

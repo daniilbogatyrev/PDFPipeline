@@ -1,13 +1,17 @@
 """
 DocIntel Lab - Streamlit Application.
-Integriert: Analyse (mit Native/Scanned), Ground Truth Editor, Benchmark.
+Integriert: Analyse (mit Native/Scanned), Ground Truth Editor, Benchmark, Tabellen-Export.
 """
 
 import streamlit as st
 import pandas as pd
 import json
+import io
+import zipfile
+from typing import List
 
-from core import DocumentOrchestrator, get_available_extractors
+from core import DocumentOrchestrator, get_available_extractors, TableExporter, create_table_export_summary
+from core.extractors import ExtractedTable, get_default_extractor
 from benchmark import GroundTruthManifest, DocumentGroundTruth, BenchmarkRunner
 
 # === Konfiguration ===
@@ -21,6 +25,7 @@ st.set_page_config(
 st.markdown("""
 <style>
     [data-testid="stMetricValue"] { font-size: 1.1rem; }
+    .table-export-btn { margin: 2px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -29,6 +34,10 @@ if "manifest" not in st.session_state:
     st.session_state.manifest = GroundTruthManifest()
 if "benchmark_result" not in st.session_state:
     st.session_state.benchmark_result = None
+if "current_extraction" not in st.session_state:
+    st.session_state.current_extraction = None
+if "current_pdf_bytes" not in st.session_state:
+    st.session_state.current_pdf_bytes = None
 
 
 # === Cached Resources ===
@@ -36,13 +45,147 @@ if "benchmark_result" not in st.session_state:
 def get_orchestrator():
     return DocumentOrchestrator()
 
+@st.cache_resource
+def get_table_exporter():
+    return TableExporter(crop_to_table=False)
+
+
+# === Helper Functions ===
+def create_table_download_buttons(
+    tables: List[ExtractedTable],
+    pdf_bytes: bytes,
+    filename: str,
+    container
+):
+    """Erstellt Download-Buttons für jede Tabelle."""
+    exporter = get_table_exporter()
+    
+    # Filtere nur Haupt-Tabellen (keine Continuations)
+    main_tables = [t for t in tables if not t.is_continuation]
+    
+    if not main_tables:
+        container.info("Keine Tabellen zum Exportieren gefunden.")
+        return
+    
+    container.markdown("### 📥 Tabellen exportieren")
+    
+    # Einzelne Tabellen
+    cols = container.columns(min(len(main_tables), 4))
+    
+    for idx, table in enumerate(main_tables):
+        col = cols[idx % len(cols)]
+        
+        # Button Label
+        if table.is_spanning:
+            label = f"T{table.table_id} (S.{table.page_range[0]}-{table.page_range[1]})"
+        else:
+            label = f"T{table.table_id} (S.{table.page_range[0]})"
+        
+        # Export durchführen
+        try:
+            exported = exporter.export_table(pdf_bytes, table)
+            
+            col.download_button(
+                label=f"📄 {label}",
+                data=exported.pdf_bytes,
+                file_name=exported.filename,
+                mime="application/pdf",
+                key=f"dl_table_{filename}_{table.table_id}",
+                use_container_width=True
+            )
+            col.caption(f"{exported.size_kb:.1f} KB")
+        except Exception as e:
+            col.error(f"Fehler: {e}")
+    
+    # Alle als ZIP
+    if len(main_tables) > 1:
+        container.markdown("---")
+        
+        try:
+            zip_bytes = exporter.export_tables_as_zip(
+                pdf_bytes, 
+                tables,
+                base_filename=filename.replace(".pdf", "")
+            )
+            
+            container.download_button(
+                label=f"📦 Alle {len(main_tables)} Tabellen als ZIP",
+                data=zip_bytes,
+                file_name=f"{filename.replace('.pdf', '')}_tables.zip",
+                mime="application/zip",
+                key=f"dl_all_tables_{filename}",
+                type="primary"
+            )
+        except Exception as e:
+            container.error(f"ZIP-Export fehlgeschlagen: {e}")
+
+
+def create_selective_table_export(
+    tables: List[ExtractedTable],
+    pdf_bytes: bytes,
+    filename: str,
+    container
+):
+    """Erstellt einen selektiven Export mit Checkboxen."""
+    exporter = get_table_exporter()
+    main_tables = [t for t in tables if not t.is_continuation]
+    
+    if not main_tables:
+        return
+    
+    container.markdown("### 🎯 Selektiver Export")
+    
+    # Checkboxen für Auswahl
+    selected_tables = []
+    
+    cols = container.columns(min(len(main_tables), 4))
+    for idx, table in enumerate(main_tables):
+        col = cols[idx % len(cols)]
+        
+        label = f"T{table.table_id}: {table.page_range_str}"
+        if col.checkbox(label, key=f"sel_{filename}_{table.table_id}"):
+            selected_tables.append(table)
+    
+    if selected_tables:
+        container.markdown(f"**{len(selected_tables)} Tabellen ausgewählt**")
+        
+        if len(selected_tables) == 1:
+            # Einzelner Download
+            table = selected_tables[0]
+            exported = exporter.export_table(pdf_bytes, table)
+            
+            container.download_button(
+                label=f"📄 Download: {exported.filename}",
+                data=exported.pdf_bytes,
+                file_name=exported.filename,
+                mime="application/pdf",
+                key=f"dl_selected_single_{filename}",
+                type="primary"
+            )
+        else:
+            # ZIP Download
+            zip_bytes = exporter.export_tables_as_zip(
+                pdf_bytes,
+                selected_tables,
+                base_filename=filename.replace(".pdf", "")
+            )
+            
+            container.download_button(
+                label=f"📦 Download: {len(selected_tables)} Tabellen als ZIP",
+                data=zip_bytes,
+                file_name=f"{filename.replace('.pdf', '')}_selected_tables.zip",
+                mime="application/zip",
+                key=f"dl_selected_zip_{filename}",
+                type="primary"
+            )
+
 
 # === Sidebar Navigation ===
 st.sidebar.title("🔬 DocIntel Lab")
 
 page = st.sidebar.radio(
     "Navigation",
-    ["📄 Analyse", "🎯 Ground Truth", "📊 Benchmark"],
+    ["📄 Analyse", "📥 Tabellen-Export", "🎯 Ground Truth", "📊 Benchmark"],
     label_visibility="collapsed"
 )
 
@@ -51,7 +194,7 @@ st.sidebar.caption(f"**Ground Truth:** {len(st.session_state.manifest.documents)
 
 
 # ============================================================
-# SEITE 1: ANALYSE (Original-Funktionalität erhalten)
+# SEITE 1: ANALYSE
 # ============================================================
 if page == "📄 Analyse":
     st.title("🔬 Scientific Document Intelligence")
@@ -60,6 +203,7 @@ if page == "📄 Analyse":
     """)
     
     orch = get_orchestrator()
+    extractor = get_default_extractor()
     
     uploaded_files = st.file_uploader(
         "PDF Dateien hochladen",
@@ -77,6 +221,9 @@ if page == "📄 Analyse":
             file_bytes = uploaded_file.getvalue()
             result = orch.run_pipeline(file_bytes, uploaded_file.name)
             all_results.append(result)
+            
+            # Speichere für Export-Seite
+            extraction_result = extractor.extract(file_bytes, uploaded_file.name)
             
             pdf_details = result.get("pdf_details") or {}
             layout_stats = result.get("layout_stats") or {}
@@ -106,18 +253,13 @@ if page == "📄 Analyse":
                     text_cov = pdf_details.get("text_coverage_pct", 0)
                     m1.caption(f"📝 {text_cov:.0f} chars/page")
                     
-                    # Tabellen mit GT-Vergleich
-                    gt = st.session_state.manifest.get(uploaded_file.name)
+                    # Tabellen mit Details
                     tables = layout_stats.get("tables", 0)
-                    if gt:
-                        diff = tables - gt.table_count
-                        if diff == 0:
-                            m2.metric("Tabellen", tables, delta="✓ GT", delta_color="off")
-                        else:
-                            m2.metric("Tabellen", tables, delta=f"{diff:+d} vs GT", 
-                                     delta_color="inverse" if diff > 0 else "normal")
-                    else:
-                        m2.metric("Tabellen", tables)
+                    m2.metric("Tabellen", tables)
+                    if extraction_result.tables:
+                        spanning = extraction_result.spanning_table_count
+                        if spanning > 0:
+                            m2.caption(f"🔗 {spanning} spanning")
                     
                     # Bilder
                     u_imgs = layout_stats.get("images", 0)
@@ -130,20 +272,38 @@ if page == "📄 Analyse":
                     m4.metric("Text-Blöcke", paras)
                     m4.caption(f"🧮 Mathe: {'Hoch' if math > 0 else 'Niedrig'}")
                     
+                    # Tabellen-Details
+                    if extraction_result.tables:
+                        st.markdown("---")
+                        st.markdown("**📋 Tabellen-Details:**")
+                        st.code(extraction_result.get_table_summary())
+                        
+                        # Schnell-Export Buttons
+                        create_table_download_buttons(
+                            extraction_result.tables,
+                            file_bytes,
+                            uploaded_file.name,
+                            st
+                        )
+                    
                     # OCR Hinweis
                     if layout_stats.get("requires_ocr"):
                         st.warning("⚠️ Gescanntes PDF - für Tabellen-/Texterkennung ist OCR erforderlich.")
                 
-                # Quick-Add zu Ground Truth
-                col1, col2 = st.columns([3, 1])
-                with col2:
+                # ### HIER EINGEFÜGT: Quick-Add Logic ###
+                # Check ob bereits in GT vorhanden
+                gt = st.session_state.manifest.get(uploaded_file.name)
+                
+                # Layout für den Button ganz rechts
+                col_qa1, col_qa2 = st.columns([3, 1])
+                with col_qa2:
                     if not gt:
                         if st.button("➕ Zu GT hinzufügen", key=f"add_{uploaded_file.name}"):
                             st.session_state.manifest.add(DocumentGroundTruth(
                                 file_name=uploaded_file.name,
                                 table_count=layout_stats.get("tables", 0),
                                 image_count=layout_stats.get("images", 0),
-                                pages=layout_stats.get("pages", 0)
+                                pages=pdf_details.get("pages", 0) # Korrigiert auf pdf_details
                             ))
                             st.rerun()
                     else:
@@ -152,8 +312,8 @@ if page == "📄 Analyse":
                 # Raw JSON
                 with st.expander("🛠️ Rohe JSON-Daten"):
                     st.json(result)
-        
-        # Export
+
+        # ### HIER EINGEFÜGT: Gesamt-Export Tabelle (außerhalb der Schleife) ###
         if all_results:
             st.divider()
             st.subheader("📊 Export")
@@ -177,17 +337,147 @@ if page == "📄 Analyse":
             
             df = pd.DataFrame(flat_data)
             st.dataframe(df, use_container_width=True)
-            
-            st.download_button(
-                "📥 Als CSV",
-                df.to_csv(index=False).encode('utf-8'),
-                "analyse_export.csv",
-                "text/csv"
-            )
 
 
 # ============================================================
-# SEITE 2: GROUND TRUTH EDITOR
+# SEITE 2: TABELLEN-EXPORT (NEU)
+# ============================================================
+elif page == "📥 Tabellen-Export":
+    st.title("📥 Tabellen-Export")
+    st.markdown("""
+    Extrahiere einzelne Tabellen oder Seiten-Bereiche als separate PDF-Dateien.
+    
+    **Features:**
+    - 📄 Einzelne Tabelle als PDF
+    - 📦 Mehrere Tabellen als ZIP
+    - 🎯 Selektiver Export mit Checkboxen
+    - ✂️ Seiten-Range Export
+    """)
+    
+    uploaded_file = st.file_uploader(
+        "PDF hochladen",
+        type=["pdf"],
+        key="export_upload"
+    )
+    
+    if uploaded_file:
+        file_bytes = uploaded_file.getvalue()
+        filename = uploaded_file.name
+        
+        # Extraktion durchführen
+        extractor = get_default_extractor()
+        
+        with st.spinner("Analysiere PDF..."):
+            extraction = extractor.extract(file_bytes, filename)
+        
+        if extraction.error:
+            st.error(f"Fehler bei Extraktion: {extraction.error}")
+        else:
+            st.success(f"✓ {extraction.pages} Seiten, {extraction.table_count} Tabellen gefunden")
+            
+            # Tabs für verschiedene Export-Modi
+            tab1, tab2, tab3 = st.tabs(["📄 Einzelne Tabellen", "🎯 Selektiver Export", "✂️ Seiten-Range"])
+            
+            with tab1:
+                if extraction.tables:
+                    create_table_download_buttons(
+                        extraction.tables,
+                        file_bytes,
+                        filename,
+                        st
+                    )
+                else:
+                    st.info("Keine Tabellen im Dokument gefunden.")
+            
+            with tab2:
+                if extraction.tables:
+                    create_selective_table_export(
+                        extraction.tables,
+                        file_bytes,
+                        filename,
+                        st
+                    )
+                else:
+                    st.info("Keine Tabellen zum Auswählen.")
+            
+            with tab3:
+                st.markdown("### ✂️ Seiten-Range exportieren")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    start_page = st.number_input(
+                        "Von Seite",
+                        min_value=1,
+                        max_value=extraction.pages,
+                        value=1,
+                        key="range_start"
+                    )
+                
+                with col2:
+                    end_page = st.number_input(
+                        "Bis Seite",
+                        min_value=1,
+                        max_value=extraction.pages,
+                        value=min(extraction.pages, start_page),
+                        key="range_end"
+                    )
+                
+                if start_page > end_page:
+                    st.error("Start-Seite muss kleiner/gleich End-Seite sein")
+                else:
+                    exporter = get_table_exporter()
+                    
+                    try:
+                        range_bytes = exporter.export_page_range(
+                            file_bytes,
+                            start_page,
+                            end_page
+                        )
+                        
+                        if start_page == end_page:
+                            range_filename = f"{filename.replace('.pdf', '')}_page_{start_page}.pdf"
+                        else:
+                            range_filename = f"{filename.replace('.pdf', '')}_pages_{start_page}-{end_page}.pdf"
+                        
+                        st.download_button(
+                            label=f"📄 Download: Seiten {start_page}-{end_page}",
+                            data=range_bytes,
+                            file_name=range_filename,
+                            mime="application/pdf",
+                            type="primary"
+                        )
+                        
+                        st.caption(f"Größe: {len(range_bytes)/1024:.1f} KB")
+                        
+                    except Exception as e:
+                        st.error(f"Export fehlgeschlagen: {e}")
+            
+            # Tabellen-Übersicht
+            st.markdown("---")
+            st.markdown("### 📋 Tabellen-Übersicht")
+            
+            if extraction.tables:
+                main_tables = [t for t in extraction.tables if not t.is_continuation]
+                
+                df_tables = pd.DataFrame([
+                    {
+                        "ID": f"T{t.table_id}",
+                        "Seiten": t.page_range_str,
+                        "Zeilen": t.rows,
+                        "Spalten": t.cols,
+                        "Spanning": "✓" if t.is_spanning else "",
+                    }
+                    for t in main_tables
+                ])
+                
+                st.dataframe(df_tables, use_container_width=True, hide_index=True)
+            else:
+                st.info("Keine Tabellen gefunden.")
+
+
+# ============================================================
+# SEITE 3: GROUND TRUTH EDITOR
 # ============================================================
 elif page == "🎯 Ground Truth":
     st.title("🎯 Ground Truth Editor")
@@ -306,7 +596,7 @@ elif page == "🎯 Ground Truth":
 
 
 # ============================================================
-# SEITE 3: BENCHMARK
+# SEITE 4: BENCHMARK
 # ============================================================
 elif page == "📊 Benchmark":
     st.title("📊 Benchmark")
@@ -433,3 +723,11 @@ elif page == "📊 Benchmark":
                 "benchmark_details.csv",
                 "text/csv"
             )
+        
+        # Tabellen-Details Report
+        if result.table_reports:
+            st.markdown("---")
+            st.subheader("📋 Tabellen-Details")
+            
+            df_table_details = pd.DataFrame(result.to_detailed_table_list())
+            st.dataframe(df_table_details, use_container_width=True, hide_index=True)

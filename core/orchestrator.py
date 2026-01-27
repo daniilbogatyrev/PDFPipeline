@@ -58,6 +58,8 @@ class DocumentOrchestrator:
                 
                 pipeline_output["layout_stats"] = {
                     "tables": extraction.table_count,
+                    "tables_detail": extraction.get_table_summary(),
+                    "tables_by_page": extraction.tables_by_page,
                     "images": extraction.image_count,
                     "images_total": extraction.image_count_total,
                     "paragraphs": extraction.paragraphs,
@@ -68,6 +70,7 @@ class DocumentOrchestrator:
                 # Für Scanned/Vector: Keine Extraktion möglich
                 pipeline_output["layout_stats"] = {
                     "tables": 0,
+                    "tables_detail": "N/A (OCR benötigt)",
                     "images": inspection_results.get("image_count", 0),
                     "images_total": inspection_results.get("image_count", 0),
                     "paragraphs": 0,
