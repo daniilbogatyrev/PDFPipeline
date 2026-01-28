@@ -9,9 +9,12 @@ from .table_exporter import TableExporter, ExportedTable, create_table_export_su
 from .extractors import (
     PyMuPDFExtractor,
     PDFPlumberExtractor,
+    PDFPlumberStreamExtractor,
     ExtractedTable,
+    CSVExtractionResult,
     get_default_extractor,
-    get_available_extractors
+    get_available_extractors,
+    get_available_csv_extractors
 )
 
 __all__ = [
@@ -23,7 +26,10 @@ __all__ = [
     "create_table_export_summary",
     "PyMuPDFExtractor",
     "PDFPlumberExtractor",
+    "PDFPlumberStreamExtractor",
     "ExtractedTable",
+    "CSVExtractionResult",
     "get_default_extractor",
     "get_available_extractors",
+    "get_available_csv_extractors",
 ]
